@@ -1,478 +1,309 @@
 ---
 name: comprehensive-pr-review
-description: Use for an end-to-end GitHub pull request review that validates the local PR branch, evaluates correctness, regressions, security, maintainability, project conventions, tests, performance, and edge cases, writes an English review draft for user feedback, and publishes only after explicit approval.
+description: "Use when reviewing a GitHub PR end to end. Checks ticket fit, bugs, regressions, security, reuse and lean code; drafts short plain-English findings in a local .md; publishes resolvable inline comments only after the user approves."
 ---
 
 # Comprehensive PR Review
 
-## Purpose
+Review a PR like the senior developer who will be paged when it breaks, and who will also maintain it next year.
+Order of importance: **does what the ticket asks → correct → safe → no regressions → holds under real load → lean and readable.**
+Lean still matters: every extra line must be read, tested and fixed later.
 
-Perform a rigorous, evidence-based pull request review. First inspect the PR without modifying its source code, then write every proposed GitHub comment to a temporary Markdown draft in the repository root. Iterate on that draft with the user and publish a batched GitHub review only after the user explicitly approves the exact final content.
+Flow: check the branch → understand the goal → review → write findings to a `.md` → wait for the user → publish one GitHub review with inline comments.
 
-The review is educational, not accusatory. Every comment must explain the failure mode, its impact, and a practical recommended solution. All text intended for GitHub must be in English, regardless of the language used to communicate with the user.
+## Rules
 
-## Non-Negotiable Rules
+1. Get the PR URL. If it is missing, ask for it. Never guess from the current branch.
+2. Never discard, reset, stash or overwrite local work to reach the PR branch.
+3. Do not change the PR's code. This skill reviews; it does not fix (see "Self-review" for the one exception).
+4. Read the whole PR and the code around it, not only the changed lines.
+5. Write every proposed comment to `.pr-review-<PR_NUMBER>-draft.md` in the repo root. Keep it untracked.
+6. Never publish in the first pass. Stop after the draft and wait for explicit approval of that exact draft.
+7. A material draft change needs fresh approval. A new PR head commit makes the draft stale.
+8. Publish one batched review. Never post text that was not in the approved draft.
+9. All text in the draft and on GitHub is in **English**, in **simple, clear words**: short sentences, everyday words, explain a technical term the first time. Talk to the user in their own language.
 
-1. Obtain the PR URL. If the invocation does not include one, ask for it with the `question` tool.
-2. Verify the local checkout is on the PR head branch and exact reviewed head commit. Ask for explicit permission before changing branches or updating the working tree.
-3. Never discard, overwrite, reset, stash, or otherwise disturb local changes to reach the PR branch.
-4. Do not modify the PR's implementation during review. This workflow reviews code; it does not fix it.
-5. Review the entire PR and relevant surrounding code, not only isolated changed lines.
-6. Create a temporary root-level draft named `.pr-review-<PR_NUMBER>-draft.md`.
-7. Never publish during the initial review pass. Stop after presenting the draft path and wait for user feedback or explicit approval.
-8. Any material draft revision requires fresh approval. A new PR head commit invalidates the draft and all prior approval.
-9. Use one GitHub pending review to batch all approved comments. This skill is standalone and must not depend on another skill being installed.
-10. Never post a comment that was not present in the approved draft.
-11. Preserve the draft if publication fails. Remove it only after the complete review is successfully submitted, unless the user explicitly asks to keep it.
+To ask the user something, use your agent's question tool (`clarify` in Hermes, `question` in Kilo/OpenCode) with clear choices, leaving free text available.
 
-## Phase 1: PR And Environment Preflight
-
-### Obtain And Validate The PR
-
-Use the supplied GitHub PR URL as the canonical identifier. Do not guess from the current branch when no URL was supplied.
-
-Verify prerequisites and collect metadata:
+## Phase 1: Preflight
 
 ```bash
-gh --version
-gh auth status
-gh pr view "<PR_URL>" --json number,url,title,body,state,isDraft,author,baseRefName,headRefName,headRefOid,files,commits
+gh --version && gh auth status
+gh pr view "<PR_URL>" --json number,url,title,body,state,isDraft,author,baseRefName,baseRefOid,headRefName,headRefOid,files,commits,mergeable
 git status --short
 git branch --show-current
 git rev-parse HEAD
 git remote -v
 ```
 
-If `gh` is unavailable, stop before reviewing and tell the user that GitHub CLI is required. Point them to `https://cli.github.com/` and provide an appropriate installation example:
+- No `gh`: stop and point to https://cli.github.com/ (`winget install GitHub.cli`, `brew install gh`). Not logged in: the user runs `gh auth login`.
+- The PR must belong to the repo in the current folder. If not, stop; do not clone or move without permission.
+- **Self-review:** if `author.login` is the logged-in `gh` user, GitHub rejects `APPROVE` and `REQUEST_CHANGES`. Plan for `COMMENT` from the start and say so in the draft.
+- `mergeable: CONFLICTING` → note it in the summary (the author must update the branch).
 
-```text
-macOS:   brew install gh
-Windows: winget install GitHub.cli
-Linux:   use the package instructions at https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+### Branch gate
+
+Run `git fetch origin` first, then compare the local branch and `HEAD` with `headRefName` / `headRefOid`.
+
+| Situation | Action |
+|---|---|
+| On the PR branch, `HEAD` = PR head | Continue. |
+| Not on the PR branch, worktree clean (`git status --short` empty) | Switch yourself: `gh pr checkout "<PR_URL>"`. Tell the user which branch you left. |
+| Not on the PR branch, local changes exist | Stop. Show the branch and the changed files, and ask the user to switch (commit or move their work first). Never stash for them. |
+| On the PR branch, local is behind remote, worktree clean | `git pull --ff-only`. |
+| Local is ahead, diverged, or dirty | Stop and explain. Never force, reset or rebase. |
+
+After any switch or pull, re-run the checks. Do not review until local `HEAD` equals `headRefOid`.
+
+## Phase 2: Understand the goal
+
+1. Read the PR title, body, commits, and the linked ticket.
+2. **Ticket:** if the user gave one, read it. If not and the PR does not link one, ask the user for it (they may skip). ClickUp: use the ClickUp MCP (`clickup_get_task`); the web URL hits a login wall. List the acceptance criteria one by one.
+3. Read the repo rules: `AGENTS.md`, `CLAUDE.md`, lint/prettier config, package scripts, and any domain skill for the touched feature. Decisions written there are intentional, not findings.
+4. Read the full diff (`git diff -w --ignore-cr-at-eol origin/<base>...HEAD` hides CRLF/whitespace noise), then the callers of every changed function, the functions it calls, and its tests.
+5. Trace the real flow: where data comes in, what is stored, what goes out, who can call it.
+6. Find the expected load (README, deploy config): one admin clicking, or many users at once. Judge scale against that.
+7. Compare with the base version using `git show <base_sha>:<path>`; do not switch branches for it.
+
+Write down in 2–3 sentences what the PR does and what problem it solves. If the goal is unclear, say so and turn related findings into questions.
+
+### Large PRs
+
+If the diff is large (roughly 500+ changed lines) or the user asks, and your agent can run subagents, run up to 4 reviewers in parallel. Give each the **full diff** and repo path, one focus each:
+1. ticket fit, correctness, regressions; 2. security, errors, timeouts, scale; 3. reuse, duplication, lean/over-engineering, project conventions; 4. altitude (band-aid vs root fix), readability, maintainability.
+Their claims are unverified. Check each one in the code yourself before it enters the draft.
+
+## Phase 3: What to check
+
+Every question needs an answer backed by code, not a feeling.
+
+**1. Does it do what was asked?**
+- Each acceptance criterion: done, partly done, or missing? Check it end to end (UI → API → logic → database → permissions → feedback to the user).
+- The ticket's proposed solution is guidance, not law. A different approach is fine if it is as good or better; flag it only when it is worse or breaks a stated rule.
+- Did it add things nobody asked for (extra options, config, features, "for later" code)? Each extra is code to maintain.
+
+**2. Did it break anything?**
+- A changed signature, default, return value, condition or data shape: grep every caller.
+- Shared components, API consumers, saved data, old flows that used the same code.
+- A fix in one caller while the shared function stays broken.
+
+**3. Bugs and edge cases**
+- Wrong result, crash, empty / null / zero / last item / duplicate / very large input, rounding, time zones.
+- Double click or double submit, races (check-then-write), out-of-order responses, retries.
+- Loading, empty, error and "no permission" states in the UI.
+
+**4. Errors and timeouts**
+- External calls (APIs, DB, files) without error handling, or errors swallowed (`catch {}`, `.catch(() => {})`).
+- Calls that can hang: no timeout on fetch/external APIs, slow work inside a request, serverless time limits, sequential `await` in a loop over many items.
+- Errors shown to users must be friendly and useful, not raw stack traces or DB messages. Logs must help debugging without leaking personal data or secrets.
+- Partial failure: if step 2 of 3 fails, is data left half-written? Is a transaction needed?
+
+**5. Security**
+- Auth and permission checks on the server (hiding a button is not security), ownership and tenant checks.
+- Input validation at trust boundaries; injection, XSS, unsafe redirects, path traversal, SSRF.
+- Secrets or personal data in code, logs, responses or caches.
+- Trusted request headers (client IP, geo): check what really sits in front of production (`curl -sI <prod-url>`) and the host's docs; a proxy header is forgeable when that proxy is not in front.
+- New dependencies: needed, maintained, license OK.
+
+**6. Reuse and duplication**
+- Search the codebase before judging new code: sibling services, components in the same folder, `utils`/`lib` helpers, existing types and schemas.
+- New function, type or component that copies an existing one with a small difference → finding. Name the existing symbol (path) and the smallest extension: an optional parameter, a generic, `Pick`/`Omit`/derived type, so the new case works and old callers keep working.
+- Report duplication only when sharing really helps; do not push an abstraction for two lines.
+
+**7. Lean, not over-engineered** (best code is the code never written)
+- Dead code, unused options, abstractions with one implementation, config nobody sets, wrappers that only pass through.
+- Hand-written logic the standard library, the framework or an installed dependency already does; a new dependency for a few lines.
+- A one-liner nobody can read is not lean either.
+- A `shortcut:` comment that names its limit is a decision, not a finding, unless the real load already crosses it.
+
+**8. Readable and maintainable**
+- Clear names, small focused functions (split by job, not by line count), flat conditions instead of nested ternaries.
+- Comments: only the "why", short. Flag long comments, comments that repeat the code, and AI-style noise.
+- Altitude: a special case bolted onto shared code for one caller, a workaround on a workaround. Name the root fix; say honestly if it is big enough for its own task.
+- Will it still work with 10× the data or another variant of the feature?
+
+**9. Project conventions**
+- Same architecture, folder layout, API/error/validation patterns, design system and naming as the rest of the repo.
+- Uses project primitives instead of a parallel pattern.
+
+**10. Tests, lint and build** (see Phase 5)
+- Risky new logic (a branch, parser, money, security, data writes, a bug fix) with no test that would fail if it broke → finding, if the repo has a test setup. Ask for one good test, not coverage. Do not demand a test framework the repo does not have.
+- Lint errors in the changed files, type errors, build failures.
+
+**11. Data and compatibility**
+- Migrations: safe defaults, nullability, existing rows, rollback. Old clients and saved data still work.
+
+**12. Scope hygiene**
+- Debug code, `console.log`, secrets, generated files, unrelated refactors or formatting churn in the diff.
+
+Speed: report big slowdowns (N+1 queries, unbounded reads, O(n²) on real data, repeated work per request). Skip micro-optimizations.
+
+## Phase 4: Prove each finding
+
+- **Concrete case or no finding:** "when the user does X / this input arrives, Y goes wrong". Reproduce it when you can.
+- Try to disprove it: look for a guard, validation, framework behavior, call-site guarantee, or another file that already handles it. Confirm the code path is reachable and the value can really be empty.
+- **Check the fix too.** Before proposing a solution, confirm it really works: the symbol you name exists (grep it), it handles the failing case, it does not break other callers, it follows the repo's patterns. Prefer the smallest fix; prefer fixes that delete code; never add layers or config the problem does not need. If you doubt pure logic (regex, escaping, limits), copy it into a throwaway script in the scratch dir and run edge inputs.
+- Confidence (private, not published): 85+ = state it; 70–84 = phrase it as a question; below 70 = do not publish (put it in `Not Proposed`).
+- **Origin:**
+  - `Introduced by this PR` — not in base.
+  - `Pre-existing, made worse by this PR` — old weakness that this PR now reuses or exposes more.
+  - `Pre-existing, unchanged` — not a PR finding; mention privately under `Not Proposed`.
+- One comment per root cause. Merge symptoms of the same problem.
+- Issues the PR already lists as "known follow-up" go to `Not Proposed`.
+- No style taste, no vague "consider…", no nits that a linter already enforces.
+
+## Phase 5: Run the checks
+
+Run the smallest useful set the repo allows (its instructions win). Typical: type check, lint on changed files, targeted tests, build.
+
+```bash
+npx eslint <changed files>                 # or the repo's lint script
+npx tsc --noEmit                           # if TypeScript
+npm run build                              # if allowed
 ```
 
-After installation, authentication is required with `gh auth login`. Use an interactive terminal only when the user must complete that authentication flow. Re-run `gh auth status` afterward and do not continue until it succeeds.
+- Never run destructive or prohibited commands (DB migrate/reset/seed, deploy).
+- Before blaming the PR for a lint error, lint the base file: `git show <base_sha>:<path> | npx eslint --stdin --stdin-filename <path>`. Same error on base = pre-existing.
+- If the PR adds Prisma models, run `prisma generate` (if allowed) before `tsc`.
+- Record every command and result in the draft. If a check could not run, say why. A green build does not prove behavior, security or edge cases.
 
-Confirm that the PR belongs to the repository in the current workspace. If it belongs to another repository, stop and explain that the correct local repository is required; do not clone or change workspaces without permission.
+## Phase 6: Write the draft
 
-### Branch And Commit Gate
-
-Compare:
-
-- Current local branch against the PR `headRefName`.
-- Local `HEAD` against the PR `headRefOid`.
-- Current repository against the PR repository.
-
-If the branch differs, show the current branch, target branch, and current worktree status, then ask permission with the `question` tool before running `gh pr checkout "<PR_URL>"`.
-
-If the branch name matches but `HEAD` differs from the PR head, determine whether the local branch is behind, ahead, or diverged. Ask permission before any checkout, pull, merge, rebase, or working-tree update. Prefer a safe fast-forward where possible. Never force-update, reset, stash, or overwrite work. If local changes or divergence make a safe switch/update impossible, stop and describe the blocker.
-
-After an approved checkout or update, re-run the branch, `HEAD`, status, and PR head checks. Do not continue until the reviewed local commit exactly matches the current PR head commit.
-
-## Phase 2: Understand Intent And Project Context
-
-Before judging the implementation:
-
-1. Read the PR title, body, commit list, linked issue or specification when accessible, and base/head information.
-2. Read repository instructions such as `AGENTS.md`, `CLAUDE.md`, relevant documentation, package scripts, lint configuration, and architectural guidance.
-3. Identify the intended behavior, acceptance criteria, constraints, and explicitly out-of-scope work.
-4. Inspect the complete diff and classify changed files by domain: application code, API, data, authentication, UI, infrastructure, tests, generated files, and documentation.
-5. Trace affected callers, consumers, types, persistence boundaries, authorization boundaries, and neighboring code paths.
-6. Compare changed behavior with the base version when needed using Git history or `git show`; do not switch branches merely to inspect the base implementation.
-
-Do not assume the PR description is complete or that repository documentation is current. Cross-check claims against code and observable behavior. If intent remains ambiguous, record the assumption and phrase the potential finding as a question rather than an assertion.
-
-## Phase 3: Review Rubric
-
-Evaluate every applicable category. Record concrete evidence, not generic impressions.
-
-### Correctness And Objective Completion
-
-- Does the implementation satisfy the PR's stated objective and acceptance criteria end to end?
-- Are all relevant layers wired together, including UI, API, domain logic, persistence, permissions, and feedback states?
-- Are return values, state transitions, contracts, and failure behavior correct?
-- Are there incomplete branches, dead code, placeholders, or paths that only appear to work in the happy case?
-
-### Regression Risk
-
-- Could the change break existing callers, flows, state, persisted data, API consumers, shared components, or configuration?
-- Did a signature, default, condition, side effect, ordering assumption, or data shape change unexpectedly?
-- Does the implementation preserve behavior outside the new feature's intended scope?
-- Compare against the base implementation and inspect all meaningful call sites before claiming a regression.
-
-### Code Quality, Maintainability, And Scalability
-
-- Is the code clear, cohesive, minimally complex, and appropriately decomposed?
-- Are names, abstractions, boundaries, and ownership understandable?
-- Will the design remain workable as data volume, feature variants, or team ownership grows?
-- Does it avoid premature abstraction as well as tightly coupled one-off logic?
-
-### Project Consistency
-
-- Does the change follow repository architecture, conventions, design system, API patterns, validation, error handling, access control, and dependency rules?
-- Does it reuse existing framework and project primitives rather than introducing parallel patterns?
-- Are repository-specific constraints applied in every required layer?
-
-### DRY And Reuse
-
-- Is behavior duplicated that should use an existing utility, component, schema, service, constant, or source of truth?
-- Did the PR create multiple implementations that can drift?
-- Would centralization actually improve correctness and ownership, or would it merely create an unnecessary abstraction? Only report meaningful duplication.
-
-### Security And Privacy
-
-- Authentication, authorization, tenant isolation, ownership checks, and read-only restrictions.
-- Input validation, output encoding, injection, path traversal, SSRF, XSS, CSRF, unsafe redirects, and deserialization risks where applicable.
-- Secret, token, personal data, logging, caching, and error-message exposure.
-- Server-side enforcement. UI hiding alone is not security.
-- Dependency or supply-chain concerns introduced by the PR.
-
-### Edge Cases And Failure Modes
-
-- Empty, null, missing, malformed, duplicate, stale, deleted, and maximum-size inputs.
-- Partial failures, retries, timeouts, cancellation, offline behavior, and external-service failures.
-- Concurrency, races, idempotency, transaction boundaries, double submission, and out-of-order responses.
-- Time zones, locale, precision, ordering, pagination, and boundary values where relevant.
-- Loading, empty, error, permission-denied, and recovery states in user-facing flows.
-
-### Tests And Verification
-
-- Do tests cover the new behavior, regression-sensitive paths, failures, boundaries, and permissions?
-- Do assertions validate behavior rather than implementation details?
-- Would the tests fail if the suspected bug were present?
-- Are existing tests now stale or misleading?
-- Run only checks permitted by repository instructions. Never invent a test command or run prohibited database, migration, deployment, or destructive commands.
-
-### Performance And Resource Use
-
-- Algorithmic growth, repeated work, unnecessary renders, N+1 queries, unbounded reads, large payloads, memory pressure, connection use, and cache behavior.
-- Behavior under realistic production volume, not only sample data.
-- Do not report speculative micro-optimizations without a credible impact path.
-
-### Data Integrity And Compatibility
-
-- Schema and migration safety, defaults, nullability, constraints, transactions, soft deletes, and rollback implications.
-- Backward compatibility for APIs, events, persisted state, configuration, clients, and rolling deployments.
-- Data conversion, version skew, and partial deployment behavior.
-
-### Operability And Observability
-
-- Are failures diagnosable through useful errors, logs, metrics, or traces without leaking sensitive data?
-- Are retry behavior, alerts, feature flags, rollout, and recovery appropriate for the risk?
-- Could the change fail silently or leave inconsistent state?
-
-### User Experience And Accessibility
-
-- When UI changes are present, inspect responsiveness, keyboard access, focus, semantics, labels, contrast, motion, and screen-reader behavior.
-- Check destructive-action safeguards, feedback timing, error recovery, and consistency with the project's design system.
-
-### Scope And Dependency Hygiene
-
-- Is the diff focused on the stated goal, with no accidental generated files, debug code, unrelated refactors, secrets, or dependency churn?
-- Are new dependencies necessary, maintained, license-compatible where relevant, and used safely?
-- Are documentation or operational changes required for the feature to work safely?
-
-## Phase 4: Evidence And Confidence
-
-Every proposed finding must be grounded in a specific changed behavior and a plausible execution path. Reproduce or verify it when feasible.
-
-Confidence is not severity. Score confidence from 0 to 100 based on evidence that the issue is real and correctly understood:
-
-| Score | Meaning | Treatment |
-|---|---|---|
-| 95-100 | Directly reproducible or logically certain from the executed path and contract | State clearly |
-| 85-94 | Strong code-path evidence with only minor contextual uncertainty | State as a finding and name the assumption |
-| 70-84 | Plausible but material context is missing | Phrase as a non-blocking question or request for verification |
-| Below 70 | Too speculative for a public review comment | Do not propose for publication; place in the private `Not Proposed` section if useful |
-
-Before retaining a finding, attempt to disprove it:
-
-- Search for validation, guards, call-site guarantees, framework behavior, tests, or project conventions that resolve it.
-- Check whether the cited path is reachable.
-- Check whether the behavior is intentional and documented.
-- Check whether another changed file handles the concern.
-- Distinguish a defect from a preference or optional refactor.
-
-Classify origin precisely:
-
-- `Introduced by this PR`: the base branch did not contain the issue.
-- `Pre-existing, amplified by this PR`: the weakness existed, but this PR reuses it in a new path, increases exposure, or makes its impact relevant to the changed feature.
-- `Pre-existing, unchanged`: unrelated to the PR. Do not publish it as a PR finding; optionally note it privately under `Not Proposed`.
-- `Uncertain`: history or intent is insufficient. Explain what evidence is missing and use question wording.
-
-Do not blame the PR author for pre-existing behavior. Deduplicate findings that share one root cause. Prefer one well-placed comment over repeated comments on every symptom.
-
-## Phase 5: Validation
-
-Run the smallest useful set of repository-approved checks after static analysis. Examples include type checking, linting, targeted tests, build checks, or a focused reproduction, but repository instructions take precedence.
-
-Record every command and its result in the draft. If a check cannot be run because of missing credentials, environment, services, prohibited commands, or absent test infrastructure, state that limitation. Never claim the feature works solely because the code looks reasonable.
-
-Do not use validation as a substitute for review. A passing build does not prove behavior, security, permissions, or edge cases.
-
-## Phase 6: Draft The Review
-
-Create `.pr-review-<PR_NUMBER>-draft.md` in the repository root. Check whether the path already exists before writing; read and preserve relevant user edits rather than overwriting them blindly. Keep the file untracked and never stage it.
-
-The draft itself and all proposed GitHub text must be in English. Use this structure:
+Create `.pr-review-<PR_NUMBER>-draft.md` in the repo root. If it already exists, read it in full first and keep the user's edits.
 
 ````markdown
 # PR #<NUMBER> Review Draft
 
-> Status: DRAFT - DO NOT POST
-> This file is temporary and will be removed after successful publication unless the user asks to keep it.
+> DRAFT - DO NOT POST. Temporary file, removed after publishing.
 
-- PR: <URL>
-- Title: <TITLE>
-- Base: `<BASE_BRANCH>`
-- Reviewed head: `<FULL_HEAD_SHA>`
-- Proposed event: `REQUEST_CHANGES | COMMENT | APPROVE`
+- PR: <URL> — <TITLE>
+- Base: `<BASE_BRANCH>` · Reviewed head: `<FULL_HEAD_SHA>`
+- Ticket: <link or "none given">
+- Proposed event: `REQUEST_CHANGES | COMMENT | APPROVE` <reason if self-review>
 
-## Review Summary
+## What this PR does
 
-<Concise summary of what was reviewed and the overall result.>
+<2-3 simple sentences: the problem and how the PR solves it.>
 
-## Validation Performed
+## Does it do what the ticket asks?
 
-| Command/check | Result | Notes |
+| Requirement | Status | Notes |
 |---|---|---|
-| `<command>` | Passed/Failed/Not run | <evidence or limitation> |
+| <criterion> | Done / Partly / Missing | <one line> |
 
-## Coverage Checklist
+## Checks run
 
-| Area | Result | Evidence/notes |
+| Check | Result | Notes |
 |---|---|---|
-| Objective completion | Pass/Finding/Not applicable/Not verified | ... |
-| Correctness and regressions | ... | ... |
-| Maintainability and project consistency | ... | ... |
-| DRY and reuse | ... | ... |
-| Security and privacy | ... | ... |
-| Edge cases and failure modes | ... | ... |
-| Tests | ... | ... |
-| Performance and scalability | ... | ... |
-| Data integrity and compatibility | ... | ... |
-| Operability and observability | ... | ... |
-| UX and accessibility | ... | ... |
-| Scope and dependencies | ... | ... |
+| `<command>` | Passed / Failed / Not run | <one line> |
 
-## Proposed GitHub Review
+## Areas reviewed
 
-### Finding 1: <Short actionable title>
+<One short line each: ticket fit, regressions, bugs/edge cases, errors/timeouts, security, reuse, lean, readability, conventions, tests, data. "OK", "Finding N", or "Not checked: why".>
 
-- Severity: `Critical | High | Medium | Low`
-- Confidence: `<0-100>/100`
-- Disposition: `Blocking | Non-blocking question | Non-blocking suggestion`
-- Origin: `Introduced by this PR | Pre-existing, amplified by this PR | Uncertain`
-- Location: `<path>:<line>` (`RIGHT` or `LEFT`) or `Overall review body`
+## Findings
+
+### Finding 1: <short, specific title>
+
+- Location: `<path>:<line>` (`RIGHT`)
+- Confidence: <0-100> (private)
 
 #### Exact GitHub Comment
 
-<The exact English text to publish. It must include all sections below.>
+🔴 **High · Blocking**
 
-**Issue**
-<Clear explanation grounded in the code.>
+**Origin:** Introduced by this PR
 
-**Origin**
-<Whether and how the PR introduced or amplified it.>
+**Problem:** <What is wrong and why it matters, 1-3 short sentences.>
 
-**When this occurs**
-<Concrete input, state, sequence, or production scenario.>
+**When it happens:** <Concrete steps or case. Example: "When the user clicks Save twice fast, two orders are created.">
 
-**Impact**
-<Why it matters and what breaks, leaks, slows down, or becomes hard to maintain.>
+**Suggested fix:** <The smallest fix that works, naming existing code to use. A short code snippet when it helps.>
 
-**Recommended fix**
-1. <Implementation step.>
-2. <Implementation step.>
-3. <Verification or regression-test step.>
-
-<Optional alternative wording making clear the proposal is recommended, not the only acceptable design.>
-
-**Confidence: <score>/100**
+---
 
 ## Overall Review Body
 
-<Exact English body submitted with the batched review.>
+<Exact text for the review body: one-line verdict, one legend line for the colors, and the full text of any finding that could not go inline. Keep it short.>
 
-## Not Proposed For Publication
+## Not Proposed
 
-<Low-confidence suspicions, unrelated pre-existing issues, or optional notes. Explain why each is excluded. Use `None` when empty.>
+<Private notes for the user: low-confidence ideas, pre-existing issues, rejected claims, with why. "None" when empty.>
 ````
 
-Order findings by severity, then confidence. Findings are the primary output; do not bury them beneath a long overview.
+Finding format rules:
+- Severity line: `🔴 Critical/High`, `🟠 Medium`, `🟡 Low`, plus `Blocking`, `Non-blocking` or `Question`.
+- **Location** goes in the comment text only when it is not an inline comment (overall-body findings) or when it points to other related lines.
+- Each part is 1–3 short sentences. Long comments get skimmed.
+- Use a GitHub ```` ```suggestion ```` block only when the replacement is complete, valid and exactly covers the commented lines.
+- Order by severity. Number findings so the user can say "drop 2, change 4".
 
-### Comment Quality Rules
+### Inline first (resolvable threads)
 
-- Make the title and first sentence actionable and specific.
-- Explain one root issue per comment.
-- Include a concrete occurrence example, not merely "this could fail."
-- Describe user, security, data, operational, or maintenance impact without exaggeration.
-- Give clear implementation steps and include a regression test or verification step when applicable.
-- Present the solution as the recommended approach, not the only valid approach, unless a hard project/security requirement leaves no alternative.
-- Avoid personal language, sarcasm, vague criticism, praise padding, and style-only nitpicks already enforced by automation.
-- Attach inline comments only to lines eligible in the PR diff. If no suitable changed line exists, use the overall review body.
-- Include a GitHub `suggestion` block only when the replacement is complete, syntactically valid, scoped to the exact line range, and genuinely clearer than prose.
+Inline comments open threads the author can mark **Resolved**; the overall body cannot. So every finding tied to code goes inline:
+- Use a line in the PR diff: an added line, or an unchanged context line shown in the diff (`RIGHT`), or a deleted line (`LEFT`). Use `path:start-end` for a range.
+- If the real problem is on a line outside the diff, anchor on the changed line that causes or calls it, and name the real location in the text.
+- Only use `Location: Overall review body` when no changed line fits (a missing acceptance criterion, a PR-wide issue, a missing file). Copy that finding's full text into `## Overall Review Body`.
 
-### Event Selection
+### Event
 
-- `REQUEST_CHANGES`: at least one confirmed blocking correctness, regression, security, data-integrity, or objective-completion issue.
-- `COMMENT`: findings are questions/non-blocking, verification is materially incomplete, or approval is inappropriate.
-- `APPROVE`: no blocking findings remain and available evidence supports merge readiness.
+- `REQUEST_CHANGES`: at least one confirmed blocking issue (ticket not met, bug, regression, security, data integrity).
+- `COMMENT`: only questions or non-blocking findings, checks materially incomplete, or self-review.
+- `APPROVE`: nothing blocking and the evidence supports merging.
 
-Severity guidance:
+Severity: **Critical** = security breach, data loss, broad outage. **High** = main feature broken, permission bypass, serious regression. **Medium** = real bug on a narrower path, or a maintainability problem likely to cause bugs. **Low** = small, non-blocking improvement.
 
-- `Critical`: likely severe security breach, irreversible data loss/corruption, or broad production outage.
-- `High`: major feature failure, authorization bypass, serious regression, or significant data-integrity risk.
-- `Medium`: real defect affecting a narrower path, meaningful edge case, or maintainability problem likely to cause defects.
-- `Low`: limited-impact issue or worthwhile non-blocking improvement. Do not use review comments for trivial preferences.
+## Phase 7: Wait for the user
 
-## Phase 7: User Review And Iteration Gate
+1. Tell the user: draft path, number of findings, proposed event, reviewed head SHA, and a one-line summary per finding in their language.
+2. **Stop.** Do not publish in the same pass.
+3. On feedback: update the draft, say what changed, and stop again. If the user edited the file, re-read it fully; it is now the candidate.
+4. Ask for approval with choices like `Approve and publish` / `Request changes to the draft`.
+5. "Publish, but change X" where X is mechanical (formatting, a badge, a typo): apply only X, then publish. Anything that changes meaning needs a new approval.
+6. Findings from another review (e.g. a simplify pass): map each to an existing finding and strengthen it instead of adding a twin. Verify the rest in code before adding them; other reviews often state wrong failure paths. Put rejected ones in `Not Proposed` and tell the user why.
 
-After writing the draft:
+"Review the PR" or "looks fine" is not publication approval.
 
-1. Tell the user the exact file path, number of proposed findings, proposed event, and reviewed head SHA.
-2. Stop. Do not publish in the same pass.
-3. Wait for the user to inspect the file and either provide feedback or explicitly approve it.
-4. If feedback is provided, update the draft, summarize what changed, and stop again for fresh approval.
-5. If the user edited the file directly, re-read it and treat the file's current content as the candidate draft.
-6. Use the `question` tool when explicit approval is needed, with choices equivalent to `Approve exactly as drafted` and `Request revisions`. Custom feedback must remain available.
+### Self-review
 
-Approval applies only to the exact draft contents and reviewed head SHA. General statements such as "review the PR," "looks mostly fine," or prior permission to perform a review are not publication approval.
+If the user asks you to apply a fix from the draft on their own PR: apply only what they asked, run the checks, do not commit or push until they say so. The reviewed head then changes, so update the draft after the push and get approval again.
 
-## Phase 8: Revalidate Before Publishing
+## Phase 8: Revalidate before publishing
 
-After explicit approval and immediately before any GitHub write:
+Right before any GitHub write:
+1. Re-read the whole draft from disk.
+2. Re-fetch the PR; its `headRefOid` must equal `Reviewed head`. If it changed, mark the draft stale, review the new commits, update the draft, and ask again.
+3. Local branch and `HEAD` still match.
+4. Every inline location is still in the diff (the script below checks this).
 
-1. Re-read the complete draft from disk.
-2. Re-fetch PR metadata and compare the current head SHA with `Reviewed head`.
-3. Confirm the local branch and `HEAD` still match the PR.
-4. Confirm every inline location is still part of the current diff and the exact approved comment maps to the intended code.
-5. Confirm the event type and overall body match the approved draft.
+## Phase 9: Publish
 
-If the PR head changed, do not post stale comments. Mark the draft as stale, review the new commits and affected findings, update the reviewed SHA, and return to the user approval gate.
-
-If the draft changed after approval, request fresh approval.
-
-## Phase 9: Publish Through GitHub
-
-Publication requirements:
-
-- Re-check `gh` availability and authentication.
-- Create one pending review containing all approved inline comments.
-- Submit that pending review once with the approved `APPROVE`, `COMMENT`, or `REQUEST_CHANGES` event and exact overall body.
-- Do not publish comments individually and do not add unapproved text.
-- If there are no inline findings, still create an empty pending review and then submit the approved overall review/event.
-- If GitHub does not permit the selected event, such as approving one's own PR, do not silently choose a different public action. Explain the constraint and obtain approval for any changed event/body.
-
-### Collect Publication Identifiers
-
-Immediately before publishing, collect and verify the repository, PR number, and latest commit:
+Build both payloads with the bundled script, from the repo root:
 
 ```bash
-gh repo view --json nameWithOwner
-gh pr view "<PR_URL>" --json number,headRefName,headRefOid
-git branch --show-current
-git rev-parse HEAD
+python <skill_dir>/scripts/build_review_payload.py .pr-review-<N>-draft.md origin/<base> <head_sha> <EVENT> <scratch_dir>
 ```
 
-Use the base repository's `nameWithOwner`, the PR number, and the exact approved `headRefOid`. Do not infer the repository owner from the PR author's fork.
+It reads each finding's `Location` and `Exact GitHub Comment`, adds the `Finding N: title` line under the badge, refuses locations not in the PR diff, and writes `review.json` (commit + inline comments, no event → creates a **pending** review) and `submit.json` (event + overall body). On Windows, pass `cygpath -m` paths to `gh --input`.
 
-### Build The Review Payload
-
-Prefer `gh api --input` with a JSON payload over many shell `-f` arguments. This avoids quoting bugs in multiline comments, Markdown code fences, apostrophes, and repeated `comments[]` fields.
-
-Construct a temporary JSON payload from the exact approved draft:
-
-```json
-{
-  "commit_id": "<APPROVED_HEAD_SHA>",
-  "comments": [
-    {
-      "path": "src/example.ts",
-      "line": 42,
-      "side": "RIGHT",
-      "body": "<EXACT APPROVED ENGLISH COMMENT>"
-    }
-  ]
-}
+```bash
+# 1. Create one pending review (expect state PENDING; keep the id)
+gh api "repos/<OWNER>/<REPO>/pulls/<N>/reviews" --method POST --input review.json --jq "{id, state, commit_id}"
+# 2. Submit it once
+gh api "repos/<OWNER>/<REPO>/pulls/<N>/reviews/<ID>/events" --method POST --input submit.json --jq "{id, state, html_url}"
+# 3. Verify
+gh api "repos/<OWNER>/<REPO>/pulls/<N>/reviews/<ID>" --jq "{state, commit_id, body}"
+gh api "repos/<OWNER>/<REPO>/pulls/<N>/reviews/<ID>/comments" --jq "length"
 ```
 
-For deleted lines, use `"side": "LEFT"` with the base-side line number. For a multiline comment range, include `start_line` and `start_side` in addition to `line` and `side`. Omit `comments` or use an empty array when there are no inline comments.
+- Use the base repo's `nameWithOwner` (`gh repo view --json nameWithOwner`), not the author's fork.
+- If GitHub refuses the event (e.g. approving your own PR), do not silently switch events; ask the user.
+- Done only when: state matches the event (`APPROVED` / `COMMENTED` / `CHANGES_REQUESTED`), `commit_id` = reviewed head, body matches, inline comment count matches.
+- **On failure:** check whether a pending or submitted review already exists before retrying; reuse a pending review ID instead of creating a second one. Never retry blindly. Keep the draft. Troubleshoot only with official docs: https://cli.github.com/manual/gh_api, https://docs.github.com/en/rest/pulls/reviews, https://docs.github.com/en/rest/pulls/comments.
+- After verified success, delete the draft and payload files (unless the user wants them) and report: event, comment count, reviewed SHA, review URL.
 
-Do not place `event` in the creation payload. Omitting it is what creates a pending review. Do not place the overall review body in the creation payload; submit that exact body only in the final event request.
+## Done when
 
-Create the payload only after approval. Keep it untracked, never stage it, and remove it after successful publication. Use the environment's safe file-writing tools rather than shell string interpolation when comments contain multiline Markdown.
-
-### Create One Pending Review
-
-Create the pending review with the approved comments:
-
-```text
-gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>/reviews" --method POST --input "<REVIEW_PAYLOAD_PATH>" --jq "{id, state, commit_id}"
-```
-
-The expected state is `PENDING`. Capture the returned review ID. If the request returns another state or an incomplete response, stop and inspect the server result before continuing.
-
-### Submit The Pending Review
-
-Submit the captured pending review exactly once:
-
-```text
-gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>/reviews/<REVIEW_ID>/events" --method POST -f event="<APPROVE|COMMENT|REQUEST_CHANGES>" -f body="<EXACT_APPROVED_OVERALL_BODY>" --jq "{id, state, submitted_at, html_url}"
-```
-
-When the overall body contains multiline Markdown or shell-sensitive characters, use a small JSON input payload for this request as well:
-
-```json
-{
-  "event": "REQUEST_CHANGES",
-  "body": "<EXACT APPROVED OVERALL BODY>"
-}
-```
-
-Then submit it with:
-
-```text
-gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>/reviews/<REVIEW_ID>/events" --method POST --input "<SUBMIT_PAYLOAD_PATH>" --jq "{id, state, submitted_at, html_url}"
-```
-
-Prefer the JSON input form whenever the body is not a simple one-line string.
-
-### Verify Publication
-
-After submission, query the review directly:
-
-```text
-gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>/reviews/<REVIEW_ID>" --jq "{id, state, commit_id, submitted_at, html_url, body}"
-```
-
-Confirm that:
-
-- The state matches the approved event (`APPROVED`, `COMMENTED`, or `CHANGES_REQUESTED`).
-- The `commit_id` is the approved reviewed head SHA.
-- The body matches the approved overall body.
-- The expected number of inline comments exists. Query `repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>/reviews/<REVIEW_ID>/comments` if needed.
-
-Do not report success until this verification passes.
-
-### Failure Recovery
-
-If publication fails, inspect whether a pending or submitted review was already created before retrying. Never retry blindly and risk duplicate comments. Preserve the draft and report any pending review ID. If API behavior has changed, consult current official GitHub CLI and GitHub REST API documentation before adapting the request.
-
-Use only official documentation for publication troubleshooting:
-
-- GitHub CLI `gh api`: `https://cli.github.com/manual/gh_api`
-- Pull request reviews REST API: `https://docs.github.com/en/rest/pulls/reviews`
-- Pull request review comments REST API: `https://docs.github.com/en/rest/pulls/comments`
-
-If review creation succeeded but submission failed, reuse the existing pending review ID after diagnosing the failure; do not create a second review. If submission may have succeeded but the response was lost, query the review ID and current user's reviews before taking another write action.
-
-After submission, verify the resulting review state and URL or review ID. Only then remove the temporary draft unless the user asked to retain it. Report the published event, comment count, reviewed SHA, and verification result.
-
-## Review Completion Standard
-
-The workflow is complete only when one of these is true:
-
-- The draft exists and the process is explicitly waiting for user feedback/approval.
-- The approved review was published and verified, and temporary-file cleanup was handled.
-- A concrete blocker was reported without altering local work or publishing partial feedback.
+- the draft exists and you are waiting for the user, or
+- the approved review is published and verified, and temp files are cleaned up, or
+- a clear blocker was reported without touching local work or posting anything.
